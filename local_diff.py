@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+local-diff: View your uncommitted changes as a GitHub-style PR diff in the browser.
+
+Usage:
+    local-diff                  # diff of all uncommitted changes (staged + unstaged)
+    local-diff --staged         # only staged changes
+    local-diff --branch main    # diff current branch against main
+"""
+
 import argparse
 import html
 import os
@@ -162,43 +172,90 @@ def render_hunk_lines(hunk: DiffHunk) -> str:
     except (IndexError, ValueError):
         pass
 
+    # Hunk header spans both sides
     rows.append(
-        f'<tr class="hunk-header"><td class="line-num"></td><td class="line-num"></td>'
-        f'<td class="hunk-header-content">{html.escape(header)}</td></tr>'
+        f'<tr class="hunk-header">'
+        f'<td class="line-num"></td><td class="code hunk-header-content" colspan="1">{html.escape(header)}</td>'
+        f'<td class="line-num"></td><td class="code hunk-header-content" colspan="1">{html.escape(header)}</td>'
+        f'</tr>'
     )
 
-    for line in hunk.lines:
+    # Collect lines into paired rows for side-by-side display
+    # Group consecutive -/+ lines as pairs; context lines go on both sides
+    i = 0
+    lines = hunk.lines
+    while i < len(lines):
+        line = lines[i]
+
         if not line:
+            # Context (empty line from diff)
             old_num += 1
             new_num += 1
             rows.append(
-                f'<tr><td class="line-num">{old_num}</td><td class="line-num">{new_num}</td>'
-                f'<td class="code context"> </td></tr>'
+                f'<tr>'
+                f'<td class="line-num">{old_num}</td><td class="code context"> </td>'
+                f'<td class="line-num">{new_num}</td><td class="code context"> </td>'
+                f'</tr>'
             )
-        elif line.startswith("+"):
-            new_num += 1
-            rows.append(
-                f'<tr class="addition"><td class="line-num"></td><td class="line-num">{new_num}</td>'
-                f'<td class="code addition">{html.escape(line)}</td></tr>'
-            )
+            i += 1
         elif line.startswith("-"):
-            old_num += 1
+            # Collect consecutive deletions
+            del_lines = []
+            while i < len(lines) and lines[i].startswith("-"):
+                old_num += 1
+                del_lines.append((old_num, lines[i]))
+                i += 1
+            # Collect consecutive additions that follow
+            add_lines = []
+            while i < len(lines) and lines[i].startswith("+"):
+                new_num += 1
+                add_lines.append((new_num, lines[i]))
+                i += 1
+            # Pair them up
+            max_len = max(len(del_lines), len(add_lines))
+            for j in range(max_len):
+                if j < len(del_lines):
+                    left_num, left_code = del_lines[j]
+                    left = f'<td class="line-num del-num">{left_num}</td><td class="code deletion">{html.escape(left_code)}</td>'
+                else:
+                    left = '<td class="line-num"></td><td class="code empty-side"></td>'
+
+                if j < len(add_lines):
+                    right_num, right_code = add_lines[j]
+                    right = f'<td class="line-num add-num">{right_num}</td><td class="code addition">{html.escape(right_code)}</td>'
+                else:
+                    right = '<td class="line-num"></td><td class="code empty-side"></td>'
+
+                rows.append(f'<tr>{left}{right}</tr>')
+        elif line.startswith("+"):
+            # Addition without preceding deletion
+            new_num += 1
             rows.append(
-                f'<tr class="deletion"><td class="line-num">{old_num}</td><td class="line-num"></td>'
-                f'<td class="code deletion">{html.escape(line)}</td></tr>'
+                f'<tr>'
+                f'<td class="line-num"></td><td class="code empty-side"></td>'
+                f'<td class="line-num add-num">{new_num}</td><td class="code addition">{html.escape(line)}</td>'
+                f'</tr>'
             )
+            i += 1
         elif line.startswith("\\"):
             rows.append(
-                f'<tr><td class="line-num"></td><td class="line-num"></td>'
-                f'<td class="code no-newline">{html.escape(line)}</td></tr>'
+                f'<tr>'
+                f'<td class="line-num"></td><td class="code no-newline">{html.escape(line)}</td>'
+                f'<td class="line-num"></td><td class="code no-newline"></td>'
+                f'</tr>'
             )
+            i += 1
         else:
+            # Context line
             old_num += 1
             new_num += 1
             rows.append(
-                f'<tr><td class="line-num">{old_num}</td><td class="line-num">{new_num}</td>'
-                f'<td class="code context">{html.escape(line)}</td></tr>'
+                f'<tr>'
+                f'<td class="line-num">{old_num}</td><td class="code context">{html.escape(line)}</td>'
+                f'<td class="line-num">{new_num}</td><td class="code context">{html.escape(line)}</td>'
+                f'</tr>'
             )
+            i += 1
 
     return "\n".join(rows)
 
@@ -279,7 +336,7 @@ def render_html(files: list[FileDiff], repo: str, branch: str, sha: str, args) -
 }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }}
-.container {{ max-width: 1280px; margin: 0 auto; padding: 24px 16px; }}
+.container {{ max-width: 1600px; margin: 0 auto; padding: 24px 16px; }}
 .header {{ padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }}
 .header h1 {{ font-size: 20px; font-weight: 600; }}
 .header h1 .repo {{ color: var(--link); }}
@@ -301,15 +358,19 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, A
 .file-diff {{ border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }}
 .file-header {{ display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 13px; position: sticky; top: 0; z-index: 10; }}
 .file-header .file-path {{ flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-weight: 600; }}
-.diff-table {{ width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; }}
-.diff-table td {{ padding: 0 10px; white-space: pre-wrap; word-break: break-all; }}
-.line-num {{ width: 50px; min-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; vertical-align: top; padding-right: 10px !important; border-right: 1px solid var(--border); }}
-.code {{ padding-left: 16px !important; }}
+.diff-table {{ width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; table-layout: fixed; }}
+.diff-table td {{ padding: 0 10px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }}
+.diff-table td.code {{ width: 50%; }}
+.line-num {{ width: 50px; min-width: 50px; max-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; padding-right: 10px !important; border-right: 1px solid var(--border); }}
+.code {{ padding-left: 10px !important; }}
 .code.context {{ background: var(--bg); }}
 .code.addition {{ background: var(--add-bg); }}
 .code.deletion {{ background: var(--del-bg); }}
-tr.addition .line-num {{ background: var(--add-bg); }}
-tr.deletion .line-num {{ background: var(--del-bg); }}
+.code.empty-side {{ background: var(--surface); }}
+.del-num {{ background: var(--del-bg); }}
+.add-num {{ background: var(--add-bg); }}
+/* Vertical divider between left and right sides */
+.diff-table td:nth-child(3) {{ border-left: 2px solid var(--border); }}
 .hunk-header td {{ background: var(--hunk-bg); }}
 .hunk-header-content {{ color: var(--hunk-text); font-style: italic; padding: 4px 10px !important; }}
 .hunk-header .line-num {{ background: var(--hunk-bg); }}
