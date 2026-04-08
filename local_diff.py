@@ -160,104 +160,107 @@ def status_badge(status: str) -> str:
     return f'<span class="status-badge" style="background:{bg};color:{fg}">{label}</span>'
 
 
-def render_hunk_lines(hunk: DiffHunk) -> str:
-    rows = []
-    old_num = new_num = 0
-    header = hunk.header
-    try:
-        parts = header.split("@@")[1].strip()
-        old_part, new_part = parts.split(" +")
-        old_num = int(old_part.lstrip("-").split(",")[0]) - 1
-        new_num = int(new_part.split(",")[0]) - 1
-    except (IndexError, ValueError):
-        pass
+def render_hunk_lines_split(hunks: list[DiffHunk]) -> tuple[str, str]:
+    """Render hunks as two separate sets of table rows (left/right) for split view."""
+    left_rows = []
+    right_rows = []
 
-    # Hunk header spans both sides
-    rows.append(
-        f'<tr class="hunk-header">'
-        f'<td class="line-num"></td><td class="code hunk-header-content" colspan="1">{html.escape(header)}</td>'
-        f'<td class="line-num"></td><td class="code hunk-header-content" colspan="1">{html.escape(header)}</td>'
-        f'</tr>'
-    )
+    for hunk in hunks:
+        old_num = new_num = 0
+        header = hunk.header
+        try:
+            parts = header.split("@@")[1].strip()
+            old_part, new_part = parts.split(" +")
+            old_num = int(old_part.lstrip("-").split(",")[0]) - 1
+            new_num = int(new_part.split(",")[0]) - 1
+        except (IndexError, ValueError):
+            pass
 
-    # Collect lines into paired rows for side-by-side display
-    # Group consecutive -/+ lines as pairs; context lines go on both sides
-    i = 0
-    lines = hunk.lines
-    while i < len(lines):
-        line = lines[i]
+        left_rows.append(
+            f'<tr class="hunk-header"><td class="line-num"></td>'
+            f'<td class="code hunk-header-content">{html.escape(header)}</td></tr>'
+        )
+        right_rows.append(
+            f'<tr class="hunk-header"><td class="line-num"></td>'
+            f'<td class="code hunk-header-content">{html.escape(header)}</td></tr>'
+        )
 
-        if not line:
-            # Context (empty line from diff)
-            old_num += 1
-            new_num += 1
-            rows.append(
-                f'<tr>'
-                f'<td class="line-num">{old_num}</td><td class="code context"> </td>'
-                f'<td class="line-num">{new_num}</td><td class="code context"> </td>'
-                f'</tr>'
-            )
-            i += 1
-        elif line.startswith("-"):
-            # Collect consecutive deletions
-            del_lines = []
-            while i < len(lines) and lines[i].startswith("-"):
+        i = 0
+        lines = hunk.lines
+        while i < len(lines):
+            line = lines[i]
+
+            if not line:
                 old_num += 1
-                del_lines.append((old_num, lines[i]))
-                i += 1
-            # Collect consecutive additions that follow
-            add_lines = []
-            while i < len(lines) and lines[i].startswith("+"):
                 new_num += 1
-                add_lines.append((new_num, lines[i]))
+                left_rows.append(
+                    f'<tr><td class="line-num">{old_num}</td><td class="code context"> </td></tr>'
+                )
+                right_rows.append(
+                    f'<tr><td class="line-num">{new_num}</td><td class="code context"> </td></tr>'
+                )
                 i += 1
-            # Pair them up
-            max_len = max(len(del_lines), len(add_lines))
-            for j in range(max_len):
-                if j < len(del_lines):
-                    left_num, left_code = del_lines[j]
-                    left = f'<td class="line-num del-num">{left_num}</td><td class="code deletion">{html.escape(left_code)}</td>'
-                else:
-                    left = '<td class="line-num"></td><td class="code empty-side"></td>'
+            elif line.startswith("-"):
+                del_lines = []
+                while i < len(lines) and lines[i].startswith("-"):
+                    old_num += 1
+                    del_lines.append((old_num, lines[i]))
+                    i += 1
+                add_lines = []
+                while i < len(lines) and lines[i].startswith("+"):
+                    new_num += 1
+                    add_lines.append((new_num, lines[i]))
+                    i += 1
+                max_len = max(len(del_lines), len(add_lines))
+                for j in range(max_len):
+                    if j < len(del_lines):
+                        left_rows.append(
+                            f'<tr><td class="line-num del-num">{del_lines[j][0]}</td>'
+                            f'<td class="code deletion">{html.escape(del_lines[j][1])}</td></tr>'
+                        )
+                    else:
+                        left_rows.append(
+                            '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
+                        )
+                    if j < len(add_lines):
+                        right_rows.append(
+                            f'<tr><td class="line-num add-num">{add_lines[j][0]}</td>'
+                            f'<td class="code addition">{html.escape(add_lines[j][1])}</td></tr>'
+                        )
+                    else:
+                        right_rows.append(
+                            '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
+                        )
+            elif line.startswith("+"):
+                new_num += 1
+                left_rows.append(
+                    '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
+                )
+                right_rows.append(
+                    f'<tr><td class="line-num add-num">{new_num}</td>'
+                    f'<td class="code addition">{html.escape(line)}</td></tr>'
+                )
+                i += 1
+            elif line.startswith("\\"):
+                left_rows.append(
+                    f'<tr><td class="line-num"></td><td class="code no-newline">{html.escape(line)}</td></tr>'
+                )
+                right_rows.append(
+                    '<tr><td class="line-num"></td><td class="code no-newline"></td></tr>'
+                )
+                i += 1
+            else:
+                old_num += 1
+                new_num += 1
+                left_rows.append(
+                    f'<tr><td class="line-num">{old_num}</td><td class="code context">{html.escape(line)}</td></tr>'
+                )
+                right_rows.append(
+                    f'<tr><td class="line-num">{new_num}</td><td class="code context">{html.escape(line)}</td></tr>'
+                )
+                i += 1
 
-                if j < len(add_lines):
-                    right_num, right_code = add_lines[j]
-                    right = f'<td class="line-num add-num">{right_num}</td><td class="code addition">{html.escape(right_code)}</td>'
-                else:
-                    right = '<td class="line-num"></td><td class="code empty-side"></td>'
-
-                rows.append(f'<tr>{left}{right}</tr>')
-        elif line.startswith("+"):
-            # Addition without preceding deletion
-            new_num += 1
-            rows.append(
-                f'<tr>'
-                f'<td class="line-num"></td><td class="code empty-side"></td>'
-                f'<td class="line-num add-num">{new_num}</td><td class="code addition">{html.escape(line)}</td>'
-                f'</tr>'
-            )
-            i += 1
-        elif line.startswith("\\"):
-            rows.append(
-                f'<tr>'
-                f'<td class="line-num"></td><td class="code no-newline">{html.escape(line)}</td>'
-                f'<td class="line-num"></td><td class="code no-newline"></td>'
-                f'</tr>'
-            )
-            i += 1
-        else:
-            # Context line
-            old_num += 1
-            new_num += 1
-            rows.append(
-                f'<tr>'
-                f'<td class="line-num">{old_num}</td><td class="code context">{html.escape(line)}</td>'
-                f'<td class="line-num">{new_num}</td><td class="code context">{html.escape(line)}</td>'
-                f'</tr>'
-            )
-            i += 1
-
-    return "\n".join(rows)
+    return "\n".join(left_rows), "\n".join(right_rows)
 
 
 def render_html(files: list[FileDiff], repo: str, branch: str, sha: str, args) -> str:
@@ -287,8 +290,14 @@ def render_html(files: list[FileDiff], repo: str, branch: str, sha: str, args) -
         elif not f.hunks:
             body = '<div class="binary-notice">File metadata changed</div>'
         else:
-            hunk_rows = "\n".join(render_hunk_lines(h) for h in f.hunks)
-            body = f'<table class="diff-table">{hunk_rows}</table>'
+            left_rows, right_rows = render_hunk_lines_split(f.hunks)
+            body = (
+                f'<div class="split-container">'
+                f'<div class="split-left"><table class="diff-table">{left_rows}</table></div>'
+                f'<div class="split-handle" title="Drag to resize"></div>'
+                f'<div class="split-right"><table class="diff-table">{right_rows}</table></div>'
+                f'</div>'
+            )
 
         diff_sections.append(
             f'<div class="file-diff" id="file-{i}">'
@@ -358,9 +367,12 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, A
 .file-diff {{ border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }}
 .file-header {{ display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 13px; position: sticky; top: 0; z-index: 10; }}
 .file-header .file-path {{ flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-weight: 600; }}
+.split-container {{ display: flex; width: 100%; overflow: hidden; }}
+.split-left, .split-right {{ overflow-x: auto; overflow-y: hidden; flex: 1 1 50%; min-width: 0; }}
+.split-handle {{ width: 6px; min-width: 6px; background: var(--border); cursor: col-resize; position: relative; z-index: 5; transition: background 0.15s; }}
+.split-handle:hover, .split-handle.active {{ background: var(--link); }}
 .diff-table {{ width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; table-layout: fixed; }}
 .diff-table td {{ padding: 0 10px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }}
-.diff-table td.code {{ width: 50%; }}
 .line-num {{ width: 50px; min-width: 50px; max-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; padding-right: 10px !important; border-right: 1px solid var(--border); }}
 .code {{ padding-left: 10px !important; }}
 .code.context {{ background: var(--bg); }}
@@ -369,8 +381,6 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, A
 .code.empty-side {{ background: var(--surface); }}
 .del-num {{ background: var(--del-bg); }}
 .add-num {{ background: var(--add-bg); }}
-/* Vertical divider between left and right sides */
-.diff-table td:nth-child(3) {{ border-left: 2px solid var(--border); }}
 .hunk-header td {{ background: var(--hunk-bg); }}
 .hunk-header-content {{ color: var(--hunk-text); font-style: italic; padding: 4px 10px !important; }}
 .hunk-header .line-num {{ background: var(--hunk-bg); }}
@@ -399,6 +409,68 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, A
     {"".join(diff_sections) if diff_sections else '<div class="empty">No changes to display.</div>'}
     <div class="footer">Generated by local-diff</div>
 </div>
+<script>
+document.querySelectorAll('.split-handle').forEach(handle => {{
+    let startX, startLeftW, startRightW, leftPane, rightPane;
+
+    function onMouseDown(e) {{
+        e.preventDefault();
+        leftPane = handle.previousElementSibling;
+        rightPane = handle.nextElementSibling;
+        const container = handle.parentElement;
+        startX = e.clientX;
+        startLeftW = leftPane.getBoundingClientRect().width;
+        startRightW = rightPane.getBoundingClientRect().width;
+        handle.classList.add('active');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'col-resize';
+    }}
+
+    function onMouseMove(e) {{
+        const dx = e.clientX - startX;
+        const totalW = startLeftW + startRightW;
+        let newLeft = startLeftW + dx;
+        let newRight = startRightW - dx;
+        // Enforce minimum 15% each side
+        const minW = totalW * 0.15;
+        if (newLeft < minW) {{ newLeft = minW; newRight = totalW - minW; }}
+        if (newRight < minW) {{ newRight = minW; newLeft = totalW - minW; }}
+        leftPane.style.flex = '0 0 ' + newLeft + 'px';
+        rightPane.style.flex = '0 0 ' + newRight + 'px';
+    }}
+
+    function onMouseUp() {{
+        handle.classList.remove('active');
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+    }}
+
+    handle.addEventListener('mousedown', onMouseDown);
+}});
+
+// Sync vertical scroll between left and right panes
+document.querySelectorAll('.split-container').forEach(container => {{
+    const left = container.querySelector('.split-left');
+    const right = container.querySelector('.split-right');
+    let syncing = false;
+    left.addEventListener('scroll', () => {{
+        if (syncing) return;
+        syncing = true;
+        right.scrollTop = left.scrollTop;
+        syncing = false;
+    }});
+    right.addEventListener('scroll', () => {{
+        if (syncing) return;
+        syncing = true;
+        left.scrollTop = right.scrollTop;
+        syncing = false;
+    }});
+}});
+</script>
 </body>
 </html>"""
 
