@@ -7,9 +7,15 @@ SCRIPT_NAME="local_diff.py"
 # Resolve the directory this installer lives in
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE="$SCRIPT_DIR/$SCRIPT_NAME"
+TEMPLATES_DIR="$SCRIPT_DIR/templates"
 
 if [ ! -f "$SOURCE" ]; then
     echo "Error: $SCRIPT_NAME not found in $SCRIPT_DIR"
+    exit 1
+fi
+
+if [ ! -d "$TEMPLATES_DIR" ]; then
+    echo "Error: templates/ directory not found in $SCRIPT_DIR"
     exit 1
 fi
 
@@ -41,27 +47,37 @@ if ! command -v git &>/dev/null; then
     exit 1
 fi
 
-# Determine install directory
+# Install to ~/.local/share/local-diff/ with a wrapper in bin
+DATA_DIR="$HOME/.local/share/$COMMAND_NAME"
+mkdir -p "$DATA_DIR"
+
+# Determine bin directory
 if [ -n "$LOCAL_DIFF_INSTALL_DIR" ]; then
-    INSTALL_DIR="$LOCAL_DIFF_INSTALL_DIR"
+    BIN_DIR="$LOCAL_DIFF_INSTALL_DIR"
 elif [ -w "/usr/local/bin" ]; then
-    INSTALL_DIR="/usr/local/bin"
-elif [ -d "$HOME/.local/bin" ]; then
-    INSTALL_DIR="$HOME/.local/bin"
+    BIN_DIR="/usr/local/bin"
 else
     mkdir -p "$HOME/.local/bin"
-    INSTALL_DIR="$HOME/.local/bin"
+    BIN_DIR="$HOME/.local/bin"
 fi
 
-DEST="$INSTALL_DIR/$COMMAND_NAME"
-
 echo "Installing $COMMAND_NAME..."
-echo "  Source: $SOURCE"
-echo "  Destination: $DEST"
+echo "  App:     $DATA_DIR/"
+echo "  Command: $BIN_DIR/$COMMAND_NAME"
 
-# Copy script and set shebang to the found Python
-sed "1s|.*|#!${PYTHON}|" "$SOURCE" > "$DEST"
-chmod +x "$DEST"
+# Copy script and templates
+sed "1s|.*|#!${PYTHON}|" "$SOURCE" > "$DATA_DIR/$SCRIPT_NAME"
+chmod +x "$DATA_DIR/$SCRIPT_NAME"
+cp -r "$TEMPLATES_DIR" "$DATA_DIR/"
+
+# Create wrapper script in bin
+cat > "$BIN_DIR/$COMMAND_NAME" <<WRAPPER
+#!${PYTHON}
+import sys, runpy
+sys.argv[0] = "$DATA_DIR/$SCRIPT_NAME"
+runpy.run_path("$DATA_DIR/$SCRIPT_NAME", run_name="__main__")
+WRAPPER
+chmod +x "$BIN_DIR/$COMMAND_NAME"
 
 # Verify it's on PATH
 if command -v "$COMMAND_NAME" &>/dev/null; then
@@ -69,10 +85,10 @@ if command -v "$COMMAND_NAME" &>/dev/null; then
     echo "Done! Run '$COMMAND_NAME' inside any git repo."
 else
     echo ""
-    echo "Installed to $DEST, but $INSTALL_DIR is not on your PATH."
+    echo "Installed to $BIN_DIR/$COMMAND_NAME, but $BIN_DIR is not on your PATH."
     echo "Add it with:"
     echo ""
-    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo "  export PATH=\"$BIN_DIR:\$PATH\""
     echo ""
     echo "Add that line to your ~/.bashrc or ~/.zshrc to make it permanent."
 fi

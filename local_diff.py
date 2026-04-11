@@ -16,30 +16,61 @@ import sys
 import tempfile
 import webbrowser
 from dataclasses import dataclass, field
+from pathlib import Path
+from string import Template
 
+TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+
+STATUS_COLORS = {
+    "added": ("#1a7f37", "#dafbe1"),
+    "deleted": ("#cf222e", "#ffebe9"),
+    "renamed": ("#9a6700", "#fff8c5"),
+    "modified": ("#0969da", "#ddf4ff"),
+}
+
+HEADER_PREFIXES = {
+    "new file": "added",
+    "deleted file": "deleted",
+    "rename from": "renamed",
+}
+
+METADATA_PREFIXES = ("similarity index", "index ", "old mode", "new mode", "rename to")
+
+
+# --- Data structures ---
 
 @dataclass
 class DiffHunk:
     header: str
-    lines: list = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
 
 
 @dataclass
 class FileDiff:
-    header_lines: list = field(default_factory=list)
+    header_lines: list[str] = field(default_factory=list)
     old_file: str = ""
     new_file: str = ""
-    status: str = "modified"  # modified, added, deleted, renamed
-    hunks: list = field(default_factory=list)
+    status: str = "modified"
+    hunks: list[DiffHunk] = field(default_factory=list)
     is_binary: bool = False
 
+    @property
+    def display_name(self) -> str:
+        return self.new_file or self.old_file
+
+    @property
+    def additions(self) -> int:
+        return sum(1 for h in self.hunks for l in h.lines if l.startswith("+"))
+
+    @property
+    def deletions(self) -> int:
+        return sum(1 for h in self.hunks for l in h.lines if l.startswith("-"))
+
+
+# --- Git helpers ---
 
 def run_git(*args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(["git", *args], capture_output=True, text=True)
     if result.returncode != 0:
         print(f"git error: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
@@ -48,82 +79,47 @@ def run_git(*args: str) -> str:
 
 def get_diff(staged_only: bool, branch: str | None) -> str:
     if branch:
-        return run_git("diff", branch + "...HEAD")
+        return run_git("diff", f"{branch}...HEAD")
     if staged_only:
         return run_git("diff", "--cached")
     return run_git("diff", "HEAD")
 
 
-def parse_diff(raw: str) -> list[FileDiff]:
-    files: list[FileDiff] = []
-    current: FileDiff | None = None
-    current_hunk: DiffHunk | None = None
+def get_untracked_diff() -> str:
+    """Generate a unified diff for each untracked file, as if added from /dev/null."""
+    untracked = [f for f in run_git("ls-files", "--others", "--exclude-standard").splitlines() if f.strip()]
+    return "".join(_diff_for_untracked(fp) for fp in untracked)
 
-    for line in raw.splitlines():
-        if line.startswith("diff --git"):
-            if current is not None:
-                if current_hunk:
-                    current.hunks.append(current_hunk)
-                files.append(current)
-            current = FileDiff(header_lines=[line])
-            current_hunk = None
-            parts = line.split(" b/", 1)
-            if len(parts) == 2:
-                current.new_file = parts[1]
-                current.old_file = line.split(" a/", 1)[1].split(" b/")[0]
-            continue
 
-        if current is None:
-            continue
+def _diff_for_untracked(filepath: str) -> str:
+    try:
+        raw = open(filepath, "rb").read(8192)
+    except (OSError, PermissionError):
+        return ""
 
-        if line.startswith("--- "):
-            path = line[4:]
-            if path == "/dev/null":
-                current.status = "added"
-            current.header_lines.append(line)
-        elif line.startswith("+++ "):
-            path = line[4:]
-            if path == "/dev/null":
-                current.status = "deleted"
-            current.header_lines.append(line)
-        elif line.startswith("Binary files"):
-            current.is_binary = True
-            current.header_lines.append(line)
-        elif line.startswith("@@"):
-            if current_hunk:
-                current.hunks.append(current_hunk)
-            current_hunk = DiffHunk(header=line)
-        elif line.startswith("new file"):
-            current.status = "added"
-            current.header_lines.append(line)
-        elif line.startswith("deleted file"):
-            current.status = "deleted"
-            current.header_lines.append(line)
-        elif line.startswith("rename from"):
-            current.status = "renamed"
-            current.header_lines.append(line)
-        elif line.startswith("rename to"):
-            current.header_lines.append(line)
-        elif line.startswith(("similarity index", "index ", "old mode", "new mode")):
-            current.header_lines.append(line)
-        elif current_hunk is not None:
-            current_hunk.lines.append(line)
+    header = f"diff --git a/{filepath} b/{filepath}\nnew file mode 100644\n--- /dev/null\n+++ b/{filepath}\n"
 
-    if current is not None:
-        if current_hunk:
-            current.hunks.append(current_hunk)
-        files.append(current)
+    if b"\x00" in raw:
+        return header + f"Binary files /dev/null and b/{filepath} differ\n"
 
-    return files
+    try:
+        lines = open(filepath, "r", errors="replace").readlines()
+    except (OSError, PermissionError):
+        return ""
+
+    if not lines:
+        return ""
+
+    body = f"@@ -0,0 +1,{len(lines)} @@\n"
+    body += "".join(f"+{line.rstrip(chr(10))}\n" for line in lines)
+    return header + body
 
 
 def get_repo_name() -> str:
     try:
         remote = run_git("remote", "get-url", "origin").strip()
         name = remote.rstrip("/").rsplit("/", 1)[-1]
-        if name.endswith(".git"):
-            name = name[:-4]
-        return name
+        return name.removesuffix(".git")
     except SystemExit:
         return os.path.basename(os.getcwd())
 
@@ -136,343 +132,300 @@ def get_short_sha() -> str:
     return run_git("rev-parse", "--short", "HEAD").strip()
 
 
-def count_changes(files: list[FileDiff]) -> tuple[int, int]:
-    additions = deletions = 0
-    for f in files:
-        for hunk in f.hunks:
-            for line in hunk.lines:
-                if line.startswith("+"):
-                    additions += 1
-                elif line.startswith("-"):
-                    deletions += 1
-    return additions, deletions
+# --- Diff parsing ---
 
+def parse_diff(raw: str) -> list[FileDiff]:
+    files: list[FileDiff] = []
+    current: FileDiff | None = None
+    current_hunk: DiffHunk | None = None
+
+    for line in raw.splitlines():
+        if line.startswith("diff --git"):
+            current = _flush_and_start(files, current, current_hunk, line)
+            current_hunk = None
+            continue
+
+        if current is None:
+            continue
+
+        current_hunk = _process_line(line, current, current_hunk)
+
+    _flush_file(files, current, current_hunk)
+    return files
+
+
+def _flush_and_start(files: list[FileDiff], current: FileDiff | None, hunk: DiffHunk | None, line: str) -> FileDiff:
+    _flush_file(files, current, hunk)
+    new_file = FileDiff(header_lines=[line])
+    parts = line.split(" b/", 1)
+    if len(parts) == 2:
+        new_file.new_file = parts[1]
+        new_file.old_file = line.split(" a/", 1)[1].split(" b/")[0]
+    return new_file
+
+
+def _flush_file(files: list[FileDiff], current: FileDiff | None, hunk: DiffHunk | None) -> None:
+    if current is None:
+        return
+    if hunk:
+        current.hunks.append(hunk)
+    files.append(current)
+
+
+def _process_line(line: str, current: FileDiff, current_hunk: DiffHunk | None) -> DiffHunk | None:
+    if line.startswith("--- ") and line[4:] == "/dev/null":
+        current.status = "added"
+        current.header_lines.append(line)
+        return current_hunk
+
+    if line.startswith("+++ ") and line[4:] == "/dev/null":
+        current.status = "deleted"
+        current.header_lines.append(line)
+        return current_hunk
+
+    if line.startswith(("--- ", "+++ ")):
+        current.header_lines.append(line)
+        return current_hunk
+
+    if line.startswith("Binary files"):
+        current.is_binary = True
+        current.header_lines.append(line)
+        return current_hunk
+
+    if line.startswith("@@"):
+        if current_hunk:
+            current.hunks.append(current_hunk)
+        return DiffHunk(header=line)
+
+    for prefix, status in HEADER_PREFIXES.items():
+        if line.startswith(prefix):
+            current.status = status
+            current.header_lines.append(line)
+            return current_hunk
+
+    if line.startswith(METADATA_PREFIXES):
+        current.header_lines.append(line)
+        return current_hunk
+
+    if current_hunk is not None:
+        current_hunk.lines.append(line)
+
+    return current_hunk
+
+
+# --- HTML rendering ---
 
 def status_badge(status: str) -> str:
-    colors = {
-        "added": ("#1a7f37", "#dafbe1"),
-        "deleted": ("#cf222e", "#ffebe9"),
-        "renamed": ("#9a6700", "#fff8c5"),
-        "modified": ("#0969da", "#ddf4ff"),
-    }
-    fg, bg = colors.get(status, ("#656d76", "#f6f8fa"))
-    label = status[0].upper()
-    return f'<span class="status-badge" style="background:{bg};color:{fg}">{label}</span>'
+    fg, bg = STATUS_COLORS.get(status, ("#656d76", "#f6f8fa"))
+    return f'<span class="status-badge" style="background:{bg};color:{fg}">{status[0].upper()}</span>'
 
 
-def render_hunk_lines_split(hunks: list[DiffHunk]) -> tuple[str, str]:
-    """Render hunks as two separate sets of table rows (left/right) for split view."""
-    left_rows = []
-    right_rows = []
+def _row(num_cls: str, num: str, code_cls: str, content: str) -> str:
+    return f'<tr><td class="line-num {num_cls}">{num}</td><td class="code {code_cls}">{content}</td></tr>'
+
+
+def _parse_hunk_start(header: str) -> tuple[int, int]:
+    try:
+        parts = header.split("@@")[1].strip()
+        old_part, new_part = parts.split(" +")
+        old = int(old_part.lstrip("-").split(",")[0]) - 1
+        new = int(new_part.split(",")[0]) - 1
+        return old, new
+    except (IndexError, ValueError):
+        return 0, 0
+
+
+def render_split_rows(hunks: list[DiffHunk]) -> tuple[str, str]:
+    """Render hunks as two separate sets of table rows for left/right split view."""
+    left: list[str] = []
+    right: list[str] = []
 
     for hunk in hunks:
-        old_num = new_num = 0
-        header = hunk.header
-        try:
-            parts = header.split("@@")[1].strip()
-            old_part, new_part = parts.split(" +")
-            old_num = int(old_part.lstrip("-").split(",")[0]) - 1
-            new_num = int(new_part.split(",")[0]) - 1
-        except (IndexError, ValueError):
-            pass
+        old_num, new_num = _parse_hunk_start(hunk.header)
+        escaped_header = html.escape(hunk.header)
 
-        left_rows.append(
-            f'<tr class="hunk-header"><td class="line-num"></td>'
-            f'<td class="code hunk-header-content">{html.escape(header)}</td></tr>'
-        )
-        right_rows.append(
-            f'<tr class="hunk-header"><td class="line-num"></td>'
-            f'<td class="code hunk-header-content">{html.escape(header)}</td></tr>'
-        )
+        left.append(_row("", "", "hunk-header-content", escaped_header))
+        right.append(_row("", "", "hunk-header-content", escaped_header))
+        # Add hunk-header class to the last appended rows
+        left[-1] = left[-1].replace("<tr>", '<tr class="hunk-header">')
+        right[-1] = right[-1].replace("<tr>", '<tr class="hunk-header">')
 
         i = 0
         lines = hunk.lines
         while i < len(lines):
             line = lines[i]
 
-            if not line:
+            # Context line (including empty lines from diff)
+            if not line or not line[0] in "+-\\":
                 old_num += 1
                 new_num += 1
-                left_rows.append(
-                    f'<tr><td class="line-num">{old_num}</td><td class="code context"> </td></tr>'
-                )
-                right_rows.append(
-                    f'<tr><td class="line-num">{new_num}</td><td class="code context"> </td></tr>'
-                )
+                content = html.escape(line) if line else " "
+                left.append(_row("", str(old_num), "context", content))
+                right.append(_row("", str(new_num), "context", content))
                 i += 1
-            elif line.startswith("-"):
-                del_lines = []
-                while i < len(lines) and lines[i].startswith("-"):
-                    old_num += 1
-                    del_lines.append((old_num, lines[i]))
-                    i += 1
-                add_lines = []
-                while i < len(lines) and lines[i].startswith("+"):
-                    new_num += 1
-                    add_lines.append((new_num, lines[i]))
-                    i += 1
-                max_len = max(len(del_lines), len(add_lines))
-                for j in range(max_len):
-                    if j < len(del_lines):
-                        left_rows.append(
-                            f'<tr><td class="line-num del-num">{del_lines[j][0]}</td>'
-                            f'<td class="code deletion">{html.escape(del_lines[j][1])}</td></tr>'
-                        )
-                    else:
-                        left_rows.append(
-                            '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
-                        )
-                    if j < len(add_lines):
-                        right_rows.append(
-                            f'<tr><td class="line-num add-num">{add_lines[j][0]}</td>'
-                            f'<td class="code addition">{html.escape(add_lines[j][1])}</td></tr>'
-                        )
-                    else:
-                        right_rows.append(
-                            '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
-                        )
-            elif line.startswith("+"):
-                new_num += 1
-                left_rows.append(
-                    '<tr><td class="line-num"></td><td class="code empty-side"></td></tr>'
-                )
-                right_rows.append(
-                    f'<tr><td class="line-num add-num">{new_num}</td>'
-                    f'<td class="code addition">{html.escape(line)}</td></tr>'
-                )
+                continue
+
+            # No-newline marker
+            if line.startswith("\\"):
+                left.append(_row("", "", "no-newline", html.escape(line)))
+                right.append(_row("", "", "no-newline", ""))
                 i += 1
-            elif line.startswith("\\"):
-                left_rows.append(
-                    f'<tr><td class="line-num"></td><td class="code no-newline">{html.escape(line)}</td></tr>'
-                )
-                right_rows.append(
-                    '<tr><td class="line-num"></td><td class="code no-newline"></td></tr>'
-                )
-                i += 1
-            else:
-                old_num += 1
-                new_num += 1
-                left_rows.append(
-                    f'<tr><td class="line-num">{old_num}</td><td class="code context">{html.escape(line)}</td></tr>'
-                )
-                right_rows.append(
-                    f'<tr><td class="line-num">{new_num}</td><td class="code context">{html.escape(line)}</td></tr>'
-                )
-                i += 1
+                continue
 
-    return "\n".join(left_rows), "\n".join(right_rows)
+            # Collect consecutive deletions then additions and pair them
+            if line.startswith("-"):
+                del_lines, add_lines, i, old_num, new_num = _collect_change_pair(lines, i, old_num, new_num)
+                _append_paired_rows(left, right, del_lines, add_lines)
+                continue
+
+            # Standalone addition (no preceding deletion)
+            new_num += 1
+            left.append(_row("", "", "empty-side", ""))
+            right.append(_row("add-num", str(new_num), "addition", html.escape(line)))
+            i += 1
+
+    return "\n".join(left), "\n".join(right)
 
 
-def render_html(files: list[FileDiff], repo: str, branch: str, sha: str, args) -> str:
-    additions, deletions = count_changes(files)
-    total = additions + deletions
+def _collect_change_pair(
+    lines: list[str], i: int, old_num: int, new_num: int
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]], int, int, int]:
+    del_lines: list[tuple[int, str]] = []
+    while i < len(lines) and lines[i].startswith("-"):
+        old_num += 1
+        del_lines.append((old_num, lines[i]))
+        i += 1
 
-    file_list_items = []
-    diff_sections = []
+    add_lines: list[tuple[int, str]] = []
+    while i < len(lines) and lines[i].startswith("+"):
+        new_num += 1
+        add_lines.append((new_num, lines[i]))
+        i += 1
 
-    for i, f in enumerate(files):
-        display_name = f.new_file or f.old_file
-        file_additions = sum(1 for h in f.hunks for l in h.lines if l.startswith("+"))
-        file_deletions = sum(1 for h in f.hunks for l in h.lines if l.startswith("-"))
+    return del_lines, add_lines, i, old_num, new_num
 
-        file_list_items.append(
-            f'<a class="file-item" href="#file-{i}">'
-            f'{status_badge(f.status)} '
-            f'<span class="file-name">{html.escape(display_name)}</span>'
-            f'<span class="file-stat">'
-            f'<span class="stat-add">+{file_additions}</span> '
-            f'<span class="stat-del">-{file_deletions}</span>'
-            f'</span></a>'
-        )
 
-        if f.is_binary:
-            body = '<div class="binary-notice">Binary file changed</div>'
-        elif not f.hunks:
-            body = '<div class="binary-notice">File metadata changed</div>'
+def _append_paired_rows(
+    left: list[str],
+    right: list[str],
+    del_lines: list[tuple[int, str]],
+    add_lines: list[tuple[int, str]],
+) -> None:
+    for j in range(max(len(del_lines), len(add_lines))):
+        if j < len(del_lines):
+            left.append(_row("del-num", str(del_lines[j][0]), "deletion", html.escape(del_lines[j][1])))
         else:
-            left_rows, right_rows = render_hunk_lines_split(f.hunks)
-            body = (
-                f'<div class="split-container">'
-                f'<div class="split-left"><table class="diff-table">{left_rows}</table></div>'
-                f'<div class="split-handle" title="Drag to resize"></div>'
-                f'<div class="split-right"><table class="diff-table">{right_rows}</table></div>'
-                f'</div>'
-            )
+            left.append(_row("", "", "empty-side", ""))
 
-        diff_sections.append(
-            f'<div class="file-diff" id="file-{i}">'
-            f'<div class="file-header">'
-            f'{status_badge(f.status)} '
-            f'<span class="file-path">{html.escape(display_name)}</span>'
-            f'<span class="file-stat">'
-            f'<span class="stat-add">+{file_additions}</span> '
-            f'<span class="stat-del">-{file_deletions}</span>'
-            f'</span>'
-            f'</div>'
-            f'{body}'
-            f'</div>'
-        )
+        if j < len(add_lines):
+            right.append(_row("add-num", str(add_lines[j][0]), "addition", html.escape(add_lines[j][1])))
+        else:
+            right.append(_row("", "", "empty-side", ""))
 
-    diff_label = "staged changes" if args.staged else f"branch diff vs {args.branch}" if args.branch else "uncommitted changes"
 
-    if total > 0:
-        add_pct = int(additions / total * 100)
-        bar = f'<span class="bar-add" style="width:{add_pct}%"></span><span class="bar-del" style="width:{100 - add_pct}%"></span>'
-    else:
-        bar = ""
+def render_file_list_item(index: int, f: FileDiff) -> str:
+    return (
+        f'<a class="file-item" href="#file-{index}">'
+        f'{status_badge(f.status)} '
+        f'<span class="file-name">{html.escape(f.display_name)}</span>'
+        f'<span class="file-stat">'
+        f'<span class="stat-add">+{f.additions}</span> '
+        f'<span class="stat-del">-{f.deletions}</span>'
+        f'</span></a>'
+    )
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{html.escape(repo)} - Local Diff</title>
-<style>
-:root {{
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --text: #e6edf3;
-    --text-muted: #8b949e;
-    --add-bg: rgba(46,160,67,0.15);
-    --add-line: rgba(46,160,67,0.4);
-    --add-text: #3fb950;
-    --del-bg: rgba(248,81,73,0.15);
-    --del-line: rgba(248,81,73,0.4);
-    --del-text: #f85149;
-    --hunk-bg: rgba(56,139,253,0.1);
-    --hunk-text: #79c0ff;
-    --link: #58a6ff;
-}}
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }}
-.container {{ max-width: 1600px; margin: 0 auto; padding: 24px 16px; }}
-.header {{ padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }}
-.header h1 {{ font-size: 20px; font-weight: 600; }}
-.header h1 .repo {{ color: var(--link); }}
-.header .meta {{ color: var(--text-muted); font-size: 13px; margin-top: 4px; }}
-.summary {{ display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; }}
-.summary .stat-add {{ color: var(--add-text); font-weight: 600; }}
-.summary .stat-del {{ color: var(--del-text); font-weight: 600; }}
-.summary .change-bar {{ display: flex; width: 120px; height: 8px; border-radius: 4px; overflow: hidden; }}
-.bar-add {{ background: var(--add-text); }}
-.bar-del {{ background: var(--del-text); }}
-.file-list {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 24px; overflow: hidden; }}
-.file-list-title {{ padding: 12px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border); }}
-.file-item {{ display: flex; align-items: center; gap: 8px; padding: 6px 16px; text-decoration: none; color: var(--text); font-size: 13px; border-bottom: 1px solid var(--border); }}
-.file-item:last-child {{ border-bottom: none; }}
-.file-item:hover {{ background: rgba(56,139,253,0.1); }}
-.file-item .file-name {{ flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }}
-.file-stat {{ font-size: 12px; white-space: nowrap; }}
-.status-badge {{ display: inline-block; width: 20px; height: 20px; text-align: center; line-height: 20px; border-radius: 3px; font-size: 11px; font-weight: 700; flex-shrink: 0; }}
-.file-diff {{ border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }}
-.file-header {{ display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 13px; position: sticky; top: 0; z-index: 10; }}
-.file-header .file-path {{ flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-weight: 600; }}
-.split-container {{ display: flex; width: 100%; overflow: hidden; }}
-.split-left, .split-right {{ overflow-x: auto; overflow-y: hidden; flex: 1 1 50%; min-width: 0; }}
-.split-handle {{ width: 6px; min-width: 6px; background: var(--border); cursor: col-resize; position: relative; z-index: 5; transition: background 0.15s; }}
-.split-handle:hover, .split-handle.active {{ background: var(--link); }}
-.diff-table {{ width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; table-layout: fixed; }}
-.diff-table td {{ padding: 0 10px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }}
-.line-num {{ width: 50px; min-width: 50px; max-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; padding-right: 10px !important; border-right: 1px solid var(--border); }}
-.code {{ padding-left: 10px !important; }}
-.code.context {{ background: var(--bg); }}
-.code.addition {{ background: var(--add-bg); }}
-.code.deletion {{ background: var(--del-bg); }}
-.code.empty-side {{ background: var(--surface); }}
-.del-num {{ background: var(--del-bg); }}
-.add-num {{ background: var(--add-bg); }}
-.hunk-header td {{ background: var(--hunk-bg); }}
-.hunk-header-content {{ color: var(--hunk-text); font-style: italic; padding: 4px 10px !important; }}
-.hunk-header .line-num {{ background: var(--hunk-bg); }}
-.no-newline {{ color: var(--text-muted); font-style: italic; }}
-.binary-notice {{ padding: 24px; text-align: center; color: var(--text-muted); font-style: italic; background: var(--bg); }}
-.empty {{ text-align: center; padding: 48px; color: var(--text-muted); }}
-.footer {{ text-align: center; color: var(--text-muted); font-size: 12px; padding: 24px 0; border-top: 1px solid var(--border); margin-top: 24px; }}
-</style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1><span class="repo">{html.escape(repo)}</span> &mdash; Local Diff</h1>
-        <div class="meta">{html.escape(branch)} @ {html.escape(sha)} &middot; {html.escape(diff_label)} &middot; {len(files)} file{"s" if len(files) != 1 else ""} changed</div>
-    </div>
-    <div class="summary">
-        <span class="stat-add">+{additions}</span>
-        <span class="stat-del">&minus;{deletions}</span>
-        <span>across <strong>{len(files)}</strong> file{"s" if len(files) != 1 else ""}</span>
-        <span class="change-bar">{bar}</span>
-    </div>
-    <div class="file-list">
-        <div class="file-list-title">Changed files</div>
-        {"".join(file_list_items) if file_list_items else '<div class="empty">No files</div>'}
-    </div>
-    {"".join(diff_sections) if diff_sections else '<div class="empty">No changes to display.</div>'}
-    <div class="footer">Generated by local-diff</div>
-</div>
-<script>
-document.querySelectorAll('.split-handle').forEach(handle => {{
-    let startX, startLeftW, startRightW, leftPane, rightPane;
 
-    function onMouseDown(e) {{
-        e.preventDefault();
-        leftPane = handle.previousElementSibling;
-        rightPane = handle.nextElementSibling;
-        const container = handle.parentElement;
-        startX = e.clientX;
-        startLeftW = leftPane.getBoundingClientRect().width;
-        startRightW = rightPane.getBoundingClientRect().width;
-        handle.classList.add('active');
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'col-resize';
-    }}
+def render_file_diff(index: int, f: FileDiff) -> str:
+    body = _render_file_body(f)
+    return (
+        f'<div class="file-diff" id="file-{index}">'
+        f'<div class="file-header">'
+        f'{status_badge(f.status)} '
+        f'<span class="file-path">{html.escape(f.display_name)}</span>'
+        f'<span class="file-stat">'
+        f'<span class="stat-add">+{f.additions}</span> '
+        f'<span class="stat-del">-{f.deletions}</span>'
+        f'</span></div>'
+        f'{body}</div>'
+    )
 
-    function onMouseMove(e) {{
-        const dx = e.clientX - startX;
-        const totalW = startLeftW + startRightW;
-        let newLeft = startLeftW + dx;
-        let newRight = startRightW - dx;
-        // Enforce minimum 15% each side
-        const minW = totalW * 0.15;
-        if (newLeft < minW) {{ newLeft = minW; newRight = totalW - minW; }}
-        if (newRight < minW) {{ newRight = minW; newLeft = totalW - minW; }}
-        leftPane.style.flex = '0 0 ' + newLeft + 'px';
-        rightPane.style.flex = '0 0 ' + newRight + 'px';
-    }}
 
-    function onMouseUp() {{
-        handle.classList.remove('active');
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-        document.body.style.userSelect = '';
-        document.body.style.cursor = '';
-    }}
+def _render_file_body(f: FileDiff) -> str:
+    if f.is_binary:
+        return '<div class="binary-notice">Binary file changed</div>'
+    if not f.hunks:
+        return '<div class="binary-notice">File metadata changed</div>'
 
-    handle.addEventListener('mousedown', onMouseDown);
-}});
+    left_rows, right_rows = render_split_rows(f.hunks)
+    return (
+        f'<div class="split-container">'
+        f'<div class="split-left"><table class="diff-table">{left_rows}</table></div>'
+        f'<div class="split-handle" title="Drag to resize"></div>'
+        f'<div class="split-right"><table class="diff-table">{right_rows}</table></div>'
+        f'</div>'
+    )
 
-// Sync vertical scroll between left and right panes
-document.querySelectorAll('.split-container').forEach(container => {{
-    const left = container.querySelector('.split-left');
-    const right = container.querySelector('.split-right');
-    let syncing = false;
-    left.addEventListener('scroll', () => {{
-        if (syncing) return;
-        syncing = true;
-        right.scrollTop = left.scrollTop;
-        syncing = false;
-    }});
-    right.addEventListener('scroll', () => {{
-        if (syncing) return;
-        syncing = true;
-        left.scrollTop = right.scrollTop;
-        syncing = false;
-    }});
-}});
-</script>
-</body>
-</html>"""
+
+def render_change_bar(additions: int, deletions: int) -> str:
+    total = additions + deletions
+    if total == 0:
+        return ""
+    add_pct = int(additions / total * 100)
+    return (
+        f'<span class="bar-add" style="width:{add_pct}%"></span>'
+        f'<span class="bar-del" style="width:{100 - add_pct}%"></span>'
+    )
+
+
+def load_template() -> Template:
+    template_path = TEMPLATE_DIR / "diff.html"
+    return Template(template_path.read_text())
+
+
+def render_html(files: list[FileDiff], repo: str, branch: str, sha: str, diff_label: str) -> str:
+    additions = sum(f.additions for f in files)
+    deletions = sum(f.deletions for f in files)
+    file_count = f'{len(files)} file{"s" if len(files) != 1 else ""}'
+
+    file_list = "".join(render_file_list_item(i, f) for i, f in enumerate(files))
+    diff_sections = "".join(render_file_diff(i, f) for i, f in enumerate(files))
+
+    template = load_template()
+    return template.safe_substitute(
+        repo=html.escape(repo),
+        branch=html.escape(branch),
+        sha=html.escape(sha),
+        diff_label=html.escape(diff_label),
+        file_count=file_count,
+        additions=additions,
+        deletions=deletions,
+        change_bar=render_change_bar(additions, deletions),
+        file_list=file_list or '<div class="empty">No files</div>',
+        diff_sections=diff_sections or '<div class="empty">No changes to display.</div>',
+    )
+
+
+# --- CLI ---
+
+def get_diff_label(args: argparse.Namespace) -> str:
+    if args.staged:
+        return "staged changes"
+    if args.branch:
+        return f"branch diff vs {args.branch}"
+    return "uncommitted changes"
+
+
+def write_output(content: str, output_path: str | None) -> str:
+    if output_path:
+        path = os.path.abspath(output_path)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".html", prefix="local-diff-", delete=False)
+    tmp.write(content.encode())
+    tmp.close()
+    return tmp.name
 
 
 def main():
@@ -480,6 +433,7 @@ def main():
     parser.add_argument("--staged", action="store_true", help="Show only staged changes")
     parser.add_argument("--branch", type=str, default=None, help="Diff against a branch (e.g. main)")
     parser.add_argument("--no-open", action="store_true", help="Don't auto-open the browser")
+    parser.add_argument("--no-untracked", action="store_true", help="Exclude untracked files from the diff")
     parser.add_argument("-o", "--output", type=str, default=None, help="Save HTML to this path instead of a temp file")
     args = parser.parse_args()
 
@@ -489,28 +443,25 @@ def main():
         sys.exit(1)
 
     raw_diff = get_diff(args.staged, args.branch)
+    if not args.no_untracked and not args.staged and not args.branch:
+        raw_diff += get_untracked_diff()
+
     if not raw_diff.strip():
         print("No changes found.")
         sys.exit(0)
 
     files = parse_diff(raw_diff)
-    repo = get_repo_name()
-    branch = get_branch_name()
-    sha = get_short_sha()
+    html_content = render_html(
+        files,
+        repo=get_repo_name(),
+        branch=get_branch_name(),
+        sha=get_short_sha(),
+        diff_label=get_diff_label(args),
+    )
 
-    html_content = render_html(files, repo, branch, sha, args)
-
-    if args.output:
-        out_path = os.path.abspath(args.output)
-        with open(out_path, "w") as f:
-            f.write(html_content)
-    else:
-        tmp = tempfile.NamedTemporaryFile(suffix=".html", prefix="local-diff-", delete=False)
-        tmp.write(html_content.encode())
-        tmp.close()
-        out_path = tmp.name
-
+    out_path = write_output(html_content, args.output)
     print(f"Diff written to: {out_path}")
+
     if not args.no_open:
         webbrowser.open(f"file://{out_path}")
 

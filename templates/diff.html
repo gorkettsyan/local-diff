@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${repo} - Local Diff</title>
+<style>
+:root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --add-bg: rgba(46,160,67,0.15);
+    --add-text: #3fb950;
+    --del-bg: rgba(248,81,73,0.15);
+    --del-text: #f85149;
+    --hunk-bg: rgba(56,139,253,0.1);
+    --hunk-text: #79c0ff;
+    --link: #58a6ff;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+.container { max-width: 1600px; margin: 0 auto; padding: 24px 16px; }
+.header { padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header h1 .repo { color: var(--link); }
+.header .meta { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+.summary { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; }
+.summary .stat-add { color: var(--add-text); font-weight: 600; }
+.summary .stat-del { color: var(--del-text); font-weight: 600; }
+.summary .change-bar { display: flex; width: 120px; height: 8px; border-radius: 4px; overflow: hidden; }
+.bar-add { background: var(--add-text); }
+.bar-del { background: var(--del-text); }
+.file-list { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 24px; overflow: hidden; }
+.file-list-title { padding: 12px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.file-item { display: flex; align-items: center; gap: 8px; padding: 6px 16px; text-decoration: none; color: var(--text); font-size: 13px; border-bottom: 1px solid var(--border); }
+.file-item:last-child { border-bottom: none; }
+.file-item:hover { background: rgba(56,139,253,0.1); }
+.file-item .file-name { flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }
+.file-stat { font-size: 12px; white-space: nowrap; }
+.status-badge { display: inline-block; width: 20px; height: 20px; text-align: center; line-height: 20px; border-radius: 3px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+.file-diff { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }
+.file-header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 13px; position: sticky; top: 0; z-index: 10; }
+.file-header .file-path { flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-weight: 600; }
+.split-container { display: flex; width: 100%; overflow: hidden; }
+.split-left, .split-right { overflow-x: auto; overflow-y: hidden; flex: 1 1 50%; min-width: 0; }
+.split-handle { width: 6px; min-width: 6px; background: var(--border); cursor: col-resize; position: relative; z-index: 5; transition: background 0.15s; }
+.split-handle:hover, .split-handle.active { background: var(--link); }
+.diff-table { width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; table-layout: fixed; }
+.diff-table td { padding: 0 10px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }
+.line-num { width: 50px; min-width: 50px; max-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; padding-right: 10px !important; border-right: 1px solid var(--border); }
+.code { padding-left: 10px !important; }
+.code.context { background: var(--bg); }
+.code.addition { background: var(--add-bg); }
+.code.deletion { background: var(--del-bg); }
+.code.empty-side { background: var(--surface); }
+.del-num { background: var(--del-bg); }
+.add-num { background: var(--add-bg); }
+.hunk-header td { background: var(--hunk-bg); }
+.hunk-header-content { color: var(--hunk-text); font-style: italic; padding: 4px 10px !important; }
+.hunk-header .line-num { background: var(--hunk-bg); }
+.no-newline { color: var(--text-muted); font-style: italic; }
+.binary-notice { padding: 24px; text-align: center; color: var(--text-muted); font-style: italic; background: var(--bg); }
+.empty { text-align: center; padding: 48px; color: var(--text-muted); }
+.footer { text-align: center; color: var(--text-muted); font-size: 12px; padding: 24px 0; border-top: 1px solid var(--border); margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1><span class="repo">${repo}</span> &mdash; Local Diff</h1>
+        <div class="meta">${branch} @ ${sha} &middot; ${diff_label} &middot; ${file_count} changed</div>
+    </div>
+    <div class="summary">
+        <span class="stat-add">+${additions}</span>
+        <span class="stat-del">&minus;${deletions}</span>
+        <span>across <strong>${file_count}</strong> changed</span>
+        <span class="change-bar">${change_bar}</span>
+    </div>
+    <div class="file-list">
+        <div class="file-list-title">Changed files</div>
+        ${file_list}
+    </div>
+    ${diff_sections}
+    <div class="footer">Generated by local-diff</div>
+</div>
+<script>
+document.querySelectorAll('.split-handle').forEach(handle => {
+    let startX, startLeftW, startRightW, leftPane, rightPane;
+
+    function onMouseDown(e) {
+        e.preventDefault();
+        leftPane = handle.previousElementSibling;
+        rightPane = handle.nextElementSibling;
+        startX = e.clientX;
+        startLeftW = leftPane.getBoundingClientRect().width;
+        startRightW = rightPane.getBoundingClientRect().width;
+        handle.classList.add('active');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'col-resize';
+    }
+
+    function onMouseMove(e) {
+        const dx = e.clientX - startX;
+        const totalW = startLeftW + startRightW;
+        let newLeft = startLeftW + dx;
+        let newRight = startRightW - dx;
+        const minW = totalW * 0.15;
+        if (newLeft < minW) { newLeft = minW; newRight = totalW - minW; }
+        if (newRight < minW) { newRight = minW; newLeft = totalW - minW; }
+        leftPane.style.flex = '0 0 ' + newLeft + 'px';
+        rightPane.style.flex = '0 0 ' + newRight + 'px';
+    }
+
+    function onMouseUp() {
+        handle.classList.remove('active');
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+    }
+
+    handle.addEventListener('mousedown', onMouseDown);
+});
+
+document.querySelectorAll('.split-container').forEach(container => {
+    const left = container.querySelector('.split-left');
+    const right = container.querySelector('.split-right');
+    let syncing = false;
+    left.addEventListener('scroll', () => {
+        if (syncing) return;
+        syncing = true;
+        right.scrollTop = left.scrollTop;
+        syncing = false;
+    });
+    right.addEventListener('scroll', () => {
+        if (syncing) return;
+        syncing = true;
+        left.scrollTop = right.scrollTop;
+        syncing = false;
+    });
+});
+</script>
+</body>
+</html>
