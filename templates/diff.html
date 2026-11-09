@@ -4,19 +4,26 @@
 <meta charset="utf-8">
 <title>${repo} - Local Diff</title>
 <style>
+/* Colors follow GitHub's Primer dark theme diff tokens. */
 :root {
     --bg: #0d1117;
     --surface: #161b22;
     --border: #30363d;
     --text: #e6edf3;
     --text-muted: #8b949e;
-    --add-bg: rgba(46,160,67,0.15);
+    --add-bg: #12261e;
+    --add-num-bg: #1b4721;
     --add-text: #3fb950;
-    --del-bg: rgba(248,81,73,0.15);
+    --del-bg: #25171c;
+    --del-num-bg: #542426;
     --del-text: #f85149;
+    --empty-bg: rgba(110,118,129,0.08);
     --hunk-bg: rgba(56,139,253,0.1);
-    --hunk-text: #79c0ff;
-    --link: #58a6ff;
+    --hunk-num-bg: #143d79;
+    --hunk-text: #4493f8;
+    --line-num-text: #6e7681;
+    --link: #4493f8;
+    --sidebar-w: 260px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
@@ -31,37 +38,90 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
 .summary .change-bar { display: flex; width: 120px; height: 8px; border-radius: 4px; overflow: hidden; }
 .bar-add { background: var(--add-text); }
 .bar-del { background: var(--del-text); }
-.file-list { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 24px; overflow: hidden; }
-.file-list-title { padding: 12px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border); }
-.file-item { display: flex; align-items: center; gap: 8px; padding: 6px 16px; text-decoration: none; color: var(--text); font-size: 13px; border-bottom: 1px solid var(--border); }
-.file-item:last-child { border-bottom: none; }
-.file-item:hover { background: rgba(56,139,253,0.1); }
-.file-item .file-name { flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }
-.file-stat { font-size: 12px; white-space: nowrap; }
+.layout { display: flex; align-items: flex-start; gap: 6px; }
+.sidebar { flex: 0 0 var(--sidebar-w); width: var(--sidebar-w); min-width: 0; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: hidden; }
+.sidebar.collapsed { flex-basis: 42px; width: 42px; }
+.sidebar-handle { flex: 0 0 10px; position: sticky; top: 16px; height: calc(100vh - 32px); cursor: col-resize; }
+.sidebar-handle::before { content: ''; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; border-radius: 1px; background: var(--border); transition: background 0.15s; }
+.sidebar-handle:hover::before, .sidebar-handle.active::before { background: var(--link); }
+.sidebar-handle:has(+ .sidebar.collapsed) { display: none; }
+.main { flex: 1 1 auto; min-width: 0; }
+.file-list { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.file-list-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.sidebar-toggle { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; height: 24px; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; line-height: 1; cursor: pointer; }
+.sidebar-toggle:hover { background: var(--bg); color: var(--text); border-color: var(--link); }
+.sidebar.collapsed .file-list-title { justify-content: center; padding: 10px 8px; }
+.sidebar.collapsed .file-list-label, .sidebar.collapsed .file-list-body { display: none; }
+/* Sidebar file tree (@pierre/trees, rendered in a shadow root; themed through its override variables). */
+.file-tree { display: block; height: calc(100vh - 32px - 46px);
+    --trees-bg-override: var(--surface); --trees-fg-override: var(--text); --trees-fg-muted-override: var(--text-muted);
+    --trees-border-color-override: var(--border); --trees-accent-override: var(--link);
+    --trees-selected-bg-override: rgba(56,139,253,0.15); --trees-selected-fg-override: var(--text);
+    --trees-focus-ring-color-override: var(--link); --trees-search-bg-override: var(--bg); --trees-input-bg-override: var(--bg);
+    --trees-git-added-color-override: #3fb950; --trees-git-deleted-color-override: #f85149;
+    --trees-git-modified-color-override: #d29922; --trees-git-renamed-color-override: #4493f8;
+    --trees-font-size-override: 12px; }
+.file-stat { font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .sidebar, .sidebar.collapsed { order: -1; position: static; width: 100%; flex-basis: auto; max-height: none; }
+    .sidebar.collapsed .file-list-title { justify-content: space-between; padding: 10px 16px; }
+    .sidebar.collapsed .file-list-label { display: block; }
+    .sidebar-handle { display: none; }
+    .file-tree { height: 320px; }
+}
 .status-badge { display: inline-block; width: 20px; height: 20px; text-align: center; line-height: 20px; border-radius: 3px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
-.file-diff { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }
+.file-diff { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: clip; scroll-margin-top: 16px; }
 .file-header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 13px; position: sticky; top: 0; z-index: 10; }
 .file-header .file-path { flex: 1; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-weight: 600; }
-.split-container { display: flex; width: 100%; overflow: hidden; }
-.split-left, .split-right { overflow-x: auto; overflow-y: hidden; flex: 1 1 50%; min-width: 0; }
-.split-handle { width: 6px; min-width: 6px; background: var(--border); cursor: col-resize; position: relative; z-index: 5; transition: background 0.15s; }
-.split-handle:hover, .split-handle.active { background: var(--link); }
-.diff-table { width: 100%; border-collapse: collapse; font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; tab-size: 4; table-layout: fixed; }
-.diff-table td { padding: 0 10px; white-space: pre-wrap; word-break: break-all; vertical-align: top; }
-.line-num { width: 50px; min-width: 50px; max-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; padding-right: 10px !important; border-right: 1px solid var(--border); }
-.code { padding-left: 10px !important; }
-.code.context { background: var(--bg); }
-.code.addition { background: var(--add-bg); }
-.code.deletion { background: var(--del-bg); }
-.code.empty-side { background: var(--surface); }
-.del-num { background: var(--del-bg); }
-.add-num { background: var(--add-bg); }
-.hunk-header td { background: var(--hunk-bg); }
-.hunk-header-content { color: var(--hunk-text); font-style: italic; padding: 4px 10px !important; }
-.hunk-header .line-num { background: var(--hunk-bg); }
-.no-newline { color: var(--text-muted); font-style: italic; }
+.hunk-nav { position: fixed; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 6px 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 20; }
+.hunk-nav button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 50%; width: 28px; height: 28px; cursor: pointer; font-size: 13px; line-height: 1; }
+.hunk-nav button:hover { background: var(--link); color: #fff; border-color: var(--link); }
+.hunk-counter { font-size: 11px; color: var(--text-muted); min-width: 44px; text-align: center; user-select: none; }
+.diff-body { background: var(--bg); --diffs-font-size: 12px; --diffs-line-height: 18px; --diffs-font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }
+.diff-body diffs-container { display: block; }
 .binary-notice { padding: 24px; text-align: center; color: var(--text-muted); font-style: italic; background: var(--bg); }
 .empty { text-align: center; padding: 48px; color: var(--text-muted); }
+/* PR-style tabs, commit list and commit pages (branch comparisons). */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: -8px 0 16px; overflow-x: auto; }
+.tab { display: flex; align-items: center; gap: 6px; padding: 8px 14px; color: var(--text-muted); text-decoration: none; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.tab:hover { color: var(--text); border-bottom-color: var(--border); }
+.tab.selected { color: var(--text); font-weight: 600; border-bottom-color: #f78166; }
+.counter { display: inline-block; min-width: 20px; padding: 0 6px; border-radius: 10px; background: rgba(110,118,129,0.4); color: var(--text); font-size: 12px; font-weight: 500; line-height: 18px; text-align: center; }
+.commit-group { position: relative; padding-left: 28px; margin-bottom: 8px; }
+.commit-group::before { content: ''; position: absolute; left: 9px; top: 0; bottom: -8px; width: 2px; background: var(--border); }
+.commit-group:last-child::before { bottom: 0; }
+.commit-group-title { position: relative; font-size: 14px; font-weight: 400; color: var(--text-muted); padding: 8px 0; }
+.commit-group-title::before { content: ''; position: absolute; left: -24px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; background: var(--bg); border: 2px solid var(--border); }
+.commit-list { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.commit-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border); }
+.commit-row:last-child { border-bottom: none; }
+.commit-row:hover { background: var(--surface); }
+.commit-row:hover .commit-subject { color: var(--link); text-decoration: underline; }
+.commit-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.commit-subject { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-row-meta { font-size: 12px; color: var(--text-muted); }
+.commit-row-meta strong, .commit-meta strong { color: var(--text); font-weight: 600; }
+.commit-sha { font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; color: var(--text-muted); padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; flex-shrink: 0; }
+.avatar { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 600; }
+.stat-add { color: var(--add-text); }
+.stat-del { color: var(--del-text); }
+.commit-header { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; }
+.commit-nav { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; margin-bottom: 8px; }
+.back-link { color: var(--link); text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
+.commit-position { color: var(--text-muted); margin-left: auto; }
+.btn-group { display: inline-flex; }
+.btn { padding: 3px 12px; font-size: 12px; color: var(--text); background: #21262d; border: 1px solid var(--border); text-decoration: none; }
+.btn:first-child { border-radius: 6px 0 0 6px; }
+.btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+a.btn:hover { background: #30363d; }
+.btn.disabled { color: var(--text-muted); opacity: 0.6; }
+.commit-title { font-size: 18px; font-weight: 600; word-break: break-word; }
+.commit-body { font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; margin-top: 8px; }
+.commit-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-muted); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.commit-full-sha { margin-left: auto; }
+.commit-full-sha code { font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; color: var(--text); }
 .footer { text-align: center; color: var(--text-muted); font-size: 12px; padding: 24px 0; border-top: 1px solid var(--border); margin-top: 24px; }
 </style>
 </head>
@@ -69,79 +129,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
 <div class="container">
     <div class="header">
         <h1><span class="repo">${repo}</span> &mdash; Local Diff</h1>
-        <div class="meta">${branch} @ ${sha} &middot; ${diff_label} &middot; ${file_count} changed</div>
+        <div class="meta">${meta}</div>
     </div>
-    <div class="summary">
-        <span class="stat-add">+${additions}</span>
-        <span class="stat-del">&minus;${deletions}</span>
-        <span>across <strong>${file_count}</strong> changed</span>
-        <span class="change-bar">${change_bar}</span>
-    </div>
-    <div class="file-list">
-        <div class="file-list-title">Changed files</div>
-        ${file_list}
-    </div>
-    ${diff_sections}
+    ${tabs}
+    ${views}
     <div class="footer">Generated by local-diff</div>
 </div>
-<script>
-document.querySelectorAll('.split-handle').forEach(handle => {
-    let startX, startLeftW, startRightW, leftPane, rightPane;
-
-    function onMouseDown(e) {
-        e.preventDefault();
-        leftPane = handle.previousElementSibling;
-        rightPane = handle.nextElementSibling;
-        startX = e.clientX;
-        startLeftW = leftPane.getBoundingClientRect().width;
-        startRightW = rightPane.getBoundingClientRect().width;
-        handle.classList.add('active');
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'col-resize';
-    }
-
-    function onMouseMove(e) {
-        const dx = e.clientX - startX;
-        const totalW = startLeftW + startRightW;
-        let newLeft = startLeftW + dx;
-        let newRight = startRightW - dx;
-        const minW = totalW * 0.15;
-        if (newLeft < minW) { newLeft = minW; newRight = totalW - minW; }
-        if (newRight < minW) { newRight = minW; newLeft = totalW - minW; }
-        leftPane.style.flex = '0 0 ' + newLeft + 'px';
-        rightPane.style.flex = '0 0 ' + newRight + 'px';
-    }
-
-    function onMouseUp() {
-        handle.classList.remove('active');
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-        document.body.style.userSelect = '';
-        document.body.style.cursor = '';
-    }
-
-    handle.addEventListener('mousedown', onMouseDown);
-});
-
-document.querySelectorAll('.split-container').forEach(container => {
-    const left = container.querySelector('.split-left');
-    const right = container.querySelector('.split-right');
-    let syncing = false;
-    left.addEventListener('scroll', () => {
-        if (syncing) return;
-        syncing = true;
-        right.scrollTop = left.scrollTop;
-        syncing = false;
-    });
-    right.addEventListener('scroll', () => {
-        if (syncing) return;
-        syncing = true;
-        left.scrollTop = right.scrollTop;
-        syncing = false;
-    });
-});
-</script>
+${hunk_nav}
+<script type="application/json" id="diff-data">${diff_data}</script>
+<script type="application/json" id="diff-files">${diff_files}</script>
+<script type="application/json" id="diff-grammars">${diff_grammars}</script>
+<script>${client_js}</script>
 </body>
 </html>

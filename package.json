@@ -1,0 +1,29 @@
+{
+  "name": "local-diff",
+  "version": "2.0.0",
+  "description": "View your local git changes as a GitHub-style PR diff in the browser, without pushing",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "local-diff": "dist/local-diff.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/local-diff.js"
+  },
+  "dependencies": {
+    "@pierre/diffs": "^1.6.4",
+    "@pierre/trees": "^1.0.0-beta.6",
+    "shiki": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.9.0"
+  }
+}
